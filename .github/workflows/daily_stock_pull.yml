@@ -1,0 +1,33 @@
+name: Daily Stock Data Pull
+
+on:
+  schedule:
+    - cron: '0 2 * * 1-5'  # At 2:00 UTC (9 PM EST) every weekday
+  workflow_dispatch:
+
+jobs:
+    run-pipeline:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v4
+
+        - name: Set up Python
+          uses: actions/setup-python@v5
+          with:
+            python-version: '3.10'
+            cache: 'pip'
+
+        - name: Install Dependencies
+          run: |
+            pip install -r requirements.txt
+
+        - name: Run Stock Data Pull Script
+          env:
+            DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+            DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+            DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}   
+          run: |
+            python ETL/scripts/pull_stock_data.py
