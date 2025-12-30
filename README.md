@@ -14,8 +14,8 @@ I also wanted to develop an ETL process that was free to run, so using GitHub Ac
 
 ## Results
 
-Was shocked that it worked! Tested manually and had 2 workflow failures due to file not found issues, corrected the issue and have had successful workflow runs ever sense. The first official trading day data was pulled from was on 12/19/2025. Due to my workflows running close to the holidays an unintentional issue came up. My schedule pulled data on Christmas day, but no trading took place on that day so duplicate data was added to my Databricks Delta table.  
+Was shocked that it worked! Tested manually and had two workflow failures due to file-not-found issues, corrected the issue and have had successful workflow runs ever since. The first official trading day of data was pulled on 12/19/2025. Due to my workflows running close to the holidays an unintentional issue came up. The schedule pulled data on Christmas Day, but since no trading took place, duplicate data was added to my Databricks Delta table.  
 
-Also had some duplicate data added do to manually executing my first workflow and then the schedule running as it should which added data from 12/19/2025 twice. I went ahead and manually deleted the duplicates from my table using PySpark. The next step in this project is to add logic to account for market holidays to improve the data pipeline. 
+Additional duplicate data was also added due to manually executing the workflow and then allowing the scheduled run to execute, which resulted in data from 12/19/2025 being inserted twice. I manually deleted the duplicates from the table using PySpark. The next step in this project is to add logic to account for market holidays to improve the data pipeline. 
 
 
