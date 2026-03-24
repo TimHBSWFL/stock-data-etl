@@ -49,18 +49,30 @@ for ticker in tickers:
         print(f"Skipping {ticker}, empty dataframe")
         continue
     
-    row = df_ticker.iloc[-1]
+    for idx, row in df_ticker.iterrows():
+        rows.append({
+            "ticker": ticker,
+            "trade_date": idx.date(),
+            "open": float(row["Open"]),
+            "high": float(row["High"]),
+            "low": float(row["Low"]),
+            "close": float(row["Close"]),
+            "volume": int(row["Volume"]),
+            "run_ts": run_ts
+        })
     
-    rows.append({
-        "ticker": ticker,
-        "trade_date": row.name.date(),
-        "open": float(row["Open"]),
-        "high": float(row["High"]),
-        "low": float(row["Low"]),
-        "close": float(row["Close"]),
-        "volume": int(row["Volume"]),
-        "run_ts": run_ts
-    })
+    # row = df_ticker.iloc[-1]
+    
+    # rows.append({
+    #     "ticker": ticker,
+    #     "trade_date": row.name.date(),
+    #     "open": float(row["Open"]),
+    #     "high": float(row["High"]),
+    #     "low": float(row["Low"]),
+    #     "close": float(row["Close"]),
+    #     "volume": int(row["Volume"]),
+    #     "run_ts": run_ts
+    # })
     
 df_stocks = pd.DataFrame(rows)
 
