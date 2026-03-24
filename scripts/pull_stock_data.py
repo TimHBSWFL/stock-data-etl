@@ -4,12 +4,24 @@ import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, UTC
+import pandas_market_calendars as mcal
 
 #%%
 file_path = "files/sp500_watchlist.csv"
 
 df = pd.read_csv(file_path)
 tickers = df['tickers'].tolist()
+
+# NYSE calendar
+nyse = mcal.get_calendar('NYSE')
+
+# Today UTC date
+today = pd.Timestamp.now(tz="America/New_York").date()
+valid_days = nyse.valid_days(start_date=today, end_date=today)
+
+if valid_days.empty:
+    print(f"{today} is not a trading day. Skipping pipeline run.")
+    exit(0)
 
 # -- Download stock data --
 data = yf.download(
