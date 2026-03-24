@@ -3,7 +3,7 @@ import os
 import requests
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import pandas_market_calendars as mcal
 
 #%%
@@ -11,7 +11,7 @@ file_path = "files/sp500_watchlist.csv"
 
 df = pd.read_csv(file_path)
 tickers = df['tickers'].tolist()
-
+#%%
 # NYSE calendar
 nyse = mcal.get_calendar('NYSE')
 
@@ -23,9 +23,12 @@ if valid_days.empty:
     print(f"{today} is not a trading day. Skipping pipeline run.")
     exit(0)
 
+#%%
 # -- Download stock data --
 data = yf.download(
     tickers=tickers,
+    start="2026-03-20",
+    end="2026-03-23",
     period='1d',
     interval='1d',
     group_by='ticker',
@@ -35,7 +38,7 @@ data = yf.download(
 
 #%%
 rows = []
-run_ts = datetime.now(UTC)
+run_ts = datetime.now(timezone.utc)
 
 for ticker in tickers:
     if ticker not in data:
