@@ -27,10 +27,8 @@ if valid_days.empty:
 # -- Download stock data --
 data = yf.download(
     tickers=tickers,
-    start="2026-03-23",
-    end="2026-03-24",
-    # period='1d',
-    # interval='1d',
+    period='1d',
+    interval='1d',
     group_by='ticker',
     auto_adjust=True,
     threads=False
@@ -49,32 +47,21 @@ for ticker in tickers:
         print(f"Skipping {ticker}, empty dataframe")
         continue
     
-    for idx, row in df_ticker.iterrows():
-        rows.append({
-            "ticker": ticker,
-            "trade_date": idx.date(),
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-            "volume": int(row["Volume"]),
-            "run_ts": run_ts
-        })
+    row = df_ticker.iloc[-1]
     
-    # row = df_ticker.iloc[-1]
-    
-    # rows.append({
-    #     "ticker": ticker,
-    #     "trade_date": row.name.date(),
-    #     "open": float(row["Open"]),
-    #     "high": float(row["High"]),
-    #     "low": float(row["Low"]),
-    #     "close": float(row["Close"]),
-    #     "volume": int(row["Volume"]),
-    #     "run_ts": run_ts
-    # })
+    rows.append({
+        "ticker": ticker,
+        "trade_date": row.name.date(),
+        "open": float(row["Open"]),
+        "high": float(row["High"]),
+        "low": float(row["Low"]),
+        "close": float(row["Close"]),
+        "volume": int(row["Volume"]),
+        "run_ts": run_ts
+    })
     
 df_stocks = pd.DataFrame(rows)
+df_stocks.drop_duplicates(subset=['ticker', 'trade_date'], inplace=True)
 
 if df_stocks.empty:
     print("No stock data to insert, exiting.")
