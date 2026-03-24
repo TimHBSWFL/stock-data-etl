@@ -27,8 +27,8 @@ if valid_days.empty:
 # -- Download stock data --
 data = yf.download(
     tickers=tickers,
-    start="2026-03-20",
-    end="2026-03-23",
+    start="2026-03-23",
+    end="2026-03-24",
     # period='1d',
     # interval='1d',
     group_by='ticker',
