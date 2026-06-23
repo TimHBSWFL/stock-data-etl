@@ -1,52 +1,25 @@
 #%%
+# One-off backfill script for a full trading date missed by the daily pipeline
+# (e.g. token expiry, outage, etc.). Set BACKFILL_DATE and run manually.
 import os
 import requests
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone
-import pandas_market_calendars as mcal
+
+#%%
+# -- Edit this for whatever date you're backfilling --
+BACKFILL_DATE = "2026-06-22"
 
 #%%
 file_path = "files/sp500_watchlist.csv"
-
 df = pd.read_csv(file_path)
 tickers = df['tickers'].tolist()
 
 #%%
-# NYSE calendar
-nyse = mcal.get_calendar('NYSE')
-
-# Determine the last completed trading session.
-# period='1d' returns intraday data if the market is still open, so we
-# explicitly target the most recent session that has closed.
-now_et = pd.Timestamp.now(tz="America/New_York")
-market_close = now_et.normalize() + pd.Timedelta(hours=16)
-
-sessions = nyse.valid_days(
-    start_date=now_et.date() - pd.Timedelta(days=7),
-    end_date=now_et.date()
-)
-
-if sessions.empty:
-    print("No recent trading sessions found. Exiting.")
-    exit(0)
-
-# Use today's session only if market has closed; otherwise use the previous session
-if now_et >= market_close and sessions[-1].date() == now_et.date():
-    target_date = now_et.date()
-else:
-    completed = [s for s in sessions if s.date() < now_et.date()]
-    if not completed:
-        print("No completed trading session available yet. Exiting.")
-        exit(0)
-    target_date = completed[-1].date()
-
-print(f"Targeting trading date: {target_date}")
-
-#%%
-# -- Download stock data --
-start = str(target_date)
-end = str(target_date + pd.Timedelta(days=1))
+# yfinance end date is exclusive, so add one day to capture BACKFILL_DATE
+start = BACKFILL_DATE
+end = str(pd.Timestamp(BACKFILL_DATE) + pd.Timedelta(days=1))[:10]
 
 data = yf.download(
     tickers=tickers,
@@ -57,6 +30,10 @@ data = yf.download(
     auto_adjust=True,
     threads=False
 )
+
+if data.empty:
+    print(f"No data returned for {BACKFILL_DATE}. Exiting.")
+    exit(0)
 
 #%%
 rows = []
@@ -75,7 +52,7 @@ for ticker in tickers:
 
     rows.append({
         "ticker": ticker,
-        "trade_date": row.name.date(),
+        "trade_date": BACKFILL_DATE,
         "open": float(row["Open"]),
         "high": float(row["High"]),
         "low": float(row["Low"]),
@@ -84,22 +61,19 @@ for ticker in tickers:
         "run_ts": run_ts
     })
 
-df_stocks = pd.DataFrame(rows)
-df_stocks.drop_duplicates(subset=['ticker', 'trade_date'], inplace=True)
+df_backfill = pd.DataFrame(rows)
+print(f"Backfilling {len(df_backfill)} tickers for {BACKFILL_DATE}")
 
-if df_stocks.empty:
-    print("No stock data to insert, exiting.")
+if df_backfill.empty:
+    print("No data to insert. Exiting.")
     exit(0)
 
-# %%
-# -- Build SQL values for MERGE --
+#%%
 values_sql = ",".join([
     f"('{r.ticker}', '{r.trade_date}', {r.open}, {r.high}, {r.low}, {r.close}, {r.volume}, TIMESTAMP '{r.run_ts.strftime('%Y-%m-%d %H:%M:%S.%f')}')"
-    for r in df_stocks.itertuples()
+    for r in df_backfill.itertuples()
 ])
 
-# %%
-# MERGE instead of INSERT to handle reruns and duplicate prevention
 sql = f"""
 MERGE INTO analytics.stock_prices AS target
 USING (
@@ -119,26 +93,19 @@ WHEN NOT MATCHED THEN INSERT (ticker, trade_date, open, high, low, close, volume
 VALUES (source.ticker, source.trade_date, source.open, source.high, source.low, source.close, source.volume, source.run_ts)
 """
 
-# %%
-# -- Databricks SQL API Call --
-# ---- Config from GitHub Secrets ----
+#%%
 DATABRICKS_HOST = os.environ["DATABRICKS_HOST"]
 DATABRICKS_TOKEN = os.environ["DATABRICKS_TOKEN"]
 WAREHOUSE_ID = os.environ["DATABRICKS_WAREHOUSE_ID"]
 
-
 url = f"{DATABRICKS_HOST}/api/2.0/sql/statements"
-headers = {
-    "Authorization": f"Bearer {DATABRICKS_TOKEN}"
-    }
-
-payload = {
-    "statement": sql,
-    "warehouse_id": WAREHOUSE_ID
-}
+headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
+payload = {"statement": sql, "warehouse_id": WAREHOUSE_ID}
 
 response = requests.post(url, json=payload, headers=headers)
 
 if response.status_code != 200:
     print(response.text)
     response.raise_for_status()
+else:
+    print(f"Backfill for {BACKFILL_DATE} succeeded.")
