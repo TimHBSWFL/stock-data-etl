@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 #%%
 # -- Edit this for whatever date you're backfilling --
-BACKFILL_DATE = "2026-06-22"
+BACKFILL_DATE = "2026-08-24"
 
 #%%
 file_path = "files/sp500_watchlist.csv"
