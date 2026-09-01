@@ -2,14 +2,20 @@
 # One-off backfill script for a full trading date missed by the daily pipeline
 # (e.g. token expiry, outage, etc.). Set BACKFILL_DATE and run manually.
 import os
-import requests
+import sys
+import numpy as np
 import yfinance as yf
 import pandas as pd
 from datetime import datetime, timezone
 
+# Running the file as a script puts scripts/ on the path automatically; this
+# keeps the import working when the cells are run from the repo root.
+sys.path.append(os.path.join(os.getcwd(), "scripts"))
+from databricks_sql import execute_merge
+
 #%%
 # -- Edit this for whatever date you're backfilling --
-BACKFILL_DATE = "2026-08-24"
+BACKFILL_DATE = "2026-08-28"
 
 #%%
 file_path = "files/sp500_watchlist.csv"
@@ -50,6 +56,13 @@ for ticker in tickers:
 
     row = df_ticker.iloc[-1]
 
+    # A partial row from Yahoo would otherwise reach the SQL as a bare `nan`
+    # literal and fail the whole MERGE.
+    ohlcv = pd.to_numeric(row[["Open", "High", "Low", "Close", "Volume"]], errors="coerce")
+    if not np.isfinite(ohlcv).all():
+        print(f"Skipping {ticker}, incomplete OHLCV data")
+        continue
+
     rows.append({
         "ticker": ticker,
         "trade_date": BACKFILL_DATE,
@@ -69,12 +82,13 @@ if df_backfill.empty:
     exit(0)
 
 #%%
-values_sql = ",".join([
-    f"('{r.ticker}', '{r.trade_date}', {r.open}, {r.high}, {r.low}, {r.close}, {r.volume}, TIMESTAMP '{r.run_ts.strftime('%Y-%m-%d %H:%M:%S.%f')}')"
-    for r in df_backfill.itertuples()
-])
+def build_merge_sql(batch):
+    values_sql = ",".join([
+        f"('{r.ticker}', '{r.trade_date}', {r.open}, {r.high}, {r.low}, {r.close}, {r.volume}, TIMESTAMP '{r.run_ts.strftime('%Y-%m-%d %H:%M:%S.%f')}')"
+        for r in batch
+    ])
 
-sql = f"""
+    return f"""
 MERGE INTO analytics.stock_prices AS target
 USING (
   SELECT ticker, trade_date, open, high, low, close, volume, run_ts
@@ -94,18 +108,5 @@ VALUES (source.ticker, source.trade_date, source.open, source.high, source.low, 
 """
 
 #%%
-DATABRICKS_HOST = os.environ["DATABRICKS_HOST"]
-DATABRICKS_TOKEN = os.environ["DATABRICKS_TOKEN"]
-WAREHOUSE_ID = os.environ["DATABRICKS_WAREHOUSE_ID"]
-
-url = f"{DATABRICKS_HOST}/api/2.0/sql/statements"
-headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}"}
-payload = {"statement": sql, "warehouse_id": WAREHOUSE_ID}
-
-response = requests.post(url, json=payload, headers=headers)
-
-if response.status_code != 200:
-    print(response.text)
-    response.raise_for_status()
-else:
-    print(f"Backfill for {BACKFILL_DATE} succeeded.")
+loaded = execute_merge(list(df_backfill.itertuples()), build_merge_sql, label="tickers")
+print(f"Backfill for {BACKFILL_DATE} succeeded. {loaded} tickers loaded.")
