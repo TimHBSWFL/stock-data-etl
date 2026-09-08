@@ -10,6 +10,11 @@ this handles that a bare requests.post does not:
    with 400 BAD_REQUEST "The request could not be processed by the warehouse."
    before the statement ever reaches the warehouse (it never shows up in Query
    History). That is transient, so it is worth retrying.
+
+The statements API also auto-starts a stopped warehouse, but when that start
+fails it reports the same opaque 400 -- naming neither the phase nor the reason.
+So the start is done explicitly here first, which turns a cold-start failure
+into the warehouse's own state and health message.
 """
 import os
 import time
@@ -18,6 +23,10 @@ import requests
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 WAREHOUSE_REJECT = "could not be processed by the warehouse"
+# A cold serverless start is usually under a minute; classic warehouses take
+# longer. Kept inside the workflow's timeout-minutes so the job fails with this
+# module's message rather than being killed mid-start.
+START_TIMEOUT = 240
 
 
 class DatabricksSQLError(RuntimeError):
@@ -41,6 +50,103 @@ def _retryable(response):
     return response.status_code == 400 and WAREHOUSE_REJECT in response.text
 
 
+def _health_text(warehouse):
+    """Whatever the warehouse says about why it is unhealthy."""
+    health = warehouse.get("health") or {}
+    parts = [health.get("status"), health.get("summary"), health.get("message")]
+    code = (health.get("failure_reason") or {}).get("code")
+    if code:
+        parts.append(f"failure_reason={code}")
+    return " | ".join(p for p in parts if p) or "no health detail reported"
+
+
+def _get_warehouse(host, headers, warehouse_id):
+    """Warehouse description, or None if it cannot be inspected with this token."""
+    try:
+        response = requests.get(f"{host}/api/2.0/sql/warehouses/{warehouse_id}",
+                                headers=headers, timeout=60)
+    except requests.exceptions.RequestException as exc:
+        print(f"Could not inspect warehouse {warehouse_id} ({exc}); "
+              f"submitting anyway and letting the API auto-start it.")
+        return None
+
+    if response.status_code == 200:
+        return response.json()
+
+    # Reading the warehouse needs CAN_USE. Preflight is a diagnostic, so a token
+    # that cannot do it should not turn into a new way for the job to fail.
+    print(f"Could not inspect warehouse {warehouse_id} "
+          f"(HTTP {response.status_code}: {response.text}); submitting anyway "
+          f"and letting the API auto-start it.")
+    return None
+
+
+def _start_warehouse(host, headers, warehouse_id):
+    """Request a start. False means this token may not start it; fall back."""
+    response = requests.post(f"{host}/api/2.0/sql/warehouses/{warehouse_id}/start",
+                             headers=headers, timeout=60)
+    if response.status_code == 200:
+        return True
+    if response.status_code in (401, 403):
+        print(f"Not permitted to start warehouse {warehouse_id} "
+              f"(HTTP {response.status_code}); submitting anyway.")
+        return False
+    raise DatabricksSQLError(
+        f"Could not start warehouse {warehouse_id} "
+        f"(HTTP {response.status_code}): {response.text}")
+
+
+def ensure_warehouse_running(start_timeout=START_TIMEOUT, poll_seconds=5):
+    """Start the warehouse and wait for it, so a cold-start failure is legible."""
+    host, headers, warehouse_id = _config()
+
+    warehouse = _get_warehouse(host, headers, warehouse_id)
+    if warehouse is None:
+        return
+
+    state = warehouse.get("state")
+    if state == "RUNNING":
+        return
+    if state == "DELETED":
+        raise DatabricksSQLError(
+            f"Warehouse {warehouse_id} is DELETED. Check the warehouse ID in "
+            f"DATABRICKS_WAREHOUSE_ID against the workspace.")
+
+    print(f"Warehouse {warehouse_id} is {state}; starting it before submitting.")
+    started_at = time.monotonic()
+    deadline = started_at + start_timeout
+    start_requested = False
+
+    while True:
+        if state == "RUNNING":
+            print(f"Warehouse {warehouse_id} is RUNNING after "
+                  f"{time.monotonic() - started_at:.0f}s.")
+            return
+        if state == "DELETED":
+            raise DatabricksSQLError(
+                f"Warehouse {warehouse_id} is DELETED. Check the warehouse ID in "
+                f"DATABRICKS_WAREHOUSE_ID against the workspace.")
+        if state == "STOPPED":
+            if start_requested:
+                raise DatabricksSQLError(
+                    f"Warehouse {warehouse_id} returned to STOPPED after a start "
+                    f"request -- it could not start: {_health_text(warehouse)}")
+            if not _start_warehouse(host, headers, warehouse_id):
+                return
+            start_requested = True
+
+        if time.monotonic() > deadline:
+            raise DatabricksSQLError(
+                f"Warehouse {warehouse_id} still {state} after {start_timeout}s: "
+                f"{_health_text(warehouse)}")
+
+        time.sleep(poll_seconds)
+        warehouse = _get_warehouse(host, headers, warehouse_id)
+        if warehouse is None:
+            return
+        state = warehouse.get("state")
+
+
 def execute_statement(sql, wait_timeout="30s", max_attempts=5, poll_seconds=5,
                       poll_timeout=600):
     """Run a statement to completion. Returns the final response payload.
@@ -48,6 +154,8 @@ def execute_statement(sql, wait_timeout="30s", max_attempts=5, poll_seconds=5,
     Raises DatabricksSQLError if the request is rejected, the statement fails,
     or it is still running after poll_timeout seconds.
     """
+    ensure_warehouse_running()
+
     host, headers, warehouse_id = _config()
     url = f"{host}/api/2.0/sql/statements"
     payload = {
