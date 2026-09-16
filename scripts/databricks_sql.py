@@ -15,6 +15,12 @@ The statements API also auto-starts a stopped warehouse, but when that start
 fails it reports the same opaque 400 -- naming neither the phase nor the reason.
 So the start is done explicitly here first, which turns a cold-start failure
 into the warehouse's own state and health message.
+
+The most common cause of that cold-start failure here is a Free Edition
+workspace deactivated for inactivity: the resource-gatekeeper then denies all
+compute with denyReason INACTIVE. Failed calls do not reactivate it -- someone
+has to open the workspace UI -- so that case is named explicitly and never
+retried.
 """
 import os
 import time
@@ -23,6 +29,11 @@ import requests
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 WAREHOUSE_REJECT = "could not be processed by the warehouse"
+INACTIVE_HELP = (
+    "The Databricks workspace is deactivated for inactivity, so no compute can "
+    "be created. Log into the workspace UI to reactivate it, then re-run. "
+    "Failing jobs do not reactivate it on their own."
+)
 # A cold serverless start is usually under a minute; classic warehouses take
 # longer. Kept inside the workflow's timeout-minutes so the job fails with this
 # module's message rather than being killed mid-start.
@@ -43,11 +54,38 @@ def _config():
 
 def _retryable(response):
     """True for transient failures worth another attempt."""
+    if _workspace_inactive(response):
+        return False
     if response.status_code in RETRYABLE_STATUS:
         return True
     # The pre-warehouse rejection: transient, and distinct from a bad statement,
     # which comes back as 200 with status.state == FAILED.
     return response.status_code == 400 and WAREHOUSE_REJECT in response.text
+
+
+def _deny_reason(response):
+    """The resource-gatekeeper's denyReason from an error body, if present."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    for detail in body.get("details") or []:
+        reason = (detail.get("metadata") or {}).get("denyReason")
+        if reason:
+            return reason
+    return None
+
+
+def _workspace_inactive(response):
+    return _deny_reason(response) == "INACTIVE"
+
+
+def _explain(response, context):
+    """Error text, leading with the cause when the body names one."""
+    detail = f"HTTP {response.status_code} {context}: {response.text}"
+    if _workspace_inactive(response):
+        return f"{INACTIVE_HELP} ({detail})"
+    return detail
 
 
 def _health_text(warehouse):
@@ -92,8 +130,7 @@ def _start_warehouse(host, headers, warehouse_id):
               f"(HTTP {response.status_code}); submitting anyway.")
         return False
     raise DatabricksSQLError(
-        f"Could not start warehouse {warehouse_id} "
-        f"(HTTP {response.status_code}): {response.text}")
+        _explain(response, f"starting warehouse {warehouse_id}"))
 
 
 def ensure_warehouse_running(start_timeout=START_TIMEOUT, poll_seconds=5):
@@ -180,8 +217,7 @@ def execute_statement(sql, wait_timeout="30s", max_attempts=5, poll_seconds=5,
         if response.status_code == 200:
             break
         if not _retryable(response) or attempt == max_attempts:
-            raise DatabricksSQLError(
-                f"HTTP {response.status_code} from statements API: {response.text}")
+            raise DatabricksSQLError(_explain(response, "from statements API"))
 
         backoff = 2 ** attempt
         print(f"HTTP {response.status_code} from statements API; retrying in "
@@ -220,6 +256,30 @@ def _await_result(body, host, headers, poll_seconds, poll_timeout):
 
 def _state(body):
     return body.get("status", {}).get("state")
+
+
+def warehouse_state():
+    """Current warehouse state, or None if it cannot be inspected."""
+    host, headers, warehouse_id = _config()
+    warehouse = _get_warehouse(host, headers, warehouse_id)
+    return warehouse.get("state") if warehouse else None
+
+
+def stop_warehouse():
+    """Stop the warehouse. Best effort -- never worth failing a job over."""
+    host, headers, warehouse_id = _config()
+    try:
+        response = requests.post(
+            f"{host}/api/2.0/sql/warehouses/{warehouse_id}/stop",
+            headers=headers, timeout=60)
+    except requests.exceptions.RequestException as exc:
+        print(f"Could not stop warehouse {warehouse_id} ({exc}).")
+        return
+    if response.status_code == 200:
+        print(f"Stopped warehouse {warehouse_id}.")
+    else:
+        print(f"Could not stop warehouse {warehouse_id} "
+              f"(HTTP {response.status_code}: {response.text}).")
 
 
 def execute_merge(rows, build_sql, batch_size=200, label="rows"):

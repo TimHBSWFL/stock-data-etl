@@ -1,0 +1,39 @@
+name: Databricks Keep Alive
+
+# Free Edition deactivates a workspace after ~2 days of no activity, and the
+# weekday-only ETL and dbt schedules leave a ~72 hour weekend gap. Twice a day,
+# every day, so a skipped or delayed run still cannot open a 48 hour gap.
+# Offset from the ETL (~07:00 UTC) and dbt (~18:00 UTC) runs so this never
+# stops a warehouse they are using.
+on:
+  schedule:
+    - cron: '0 11 * * *'
+    - cron: '0 23 * * *'
+  workflow_dispatch:
+
+jobs:
+    keep-alive:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+
+        steps:
+        - name: Checkout Repository
+          uses: actions/checkout@v5
+
+        - name: Set up Python
+          uses: actions/setup-python@v6
+          with:
+            python-version: '3.10'
+
+        - name: Install Dependencies
+          run: |
+            pip install requests
+
+        - name: Touch Databricks Workspace
+          env:
+            DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+            DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+            DATABRICKS_WAREHOUSE_ID: ${{ secrets.DATABRICKS_WAREHOUSE_ID }}
+
+          run: |
+            python scripts/keep_alive.py
