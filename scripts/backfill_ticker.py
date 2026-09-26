@@ -1,7 +1,16 @@
 #%%
-# One-off backfill script for a full trading date missed by the daily pipeline
-# (e.g. token expiry, outage, etc.). Set BACKFILL_DATE and run manually.
+"""Backfill trading dates missed by the daily pipeline (token expiry, outage, etc.).
+
+    python scripts/backfill_ticker.py 2026-09-21 2026-09-24   # inclusive range
+    python scripts/backfill_ticker.py 2026-09-21              # single date
+    python scripts/backfill_ticker.py                         # the dates set below
+
+yfinance returns nothing for weekends and holidays, so a range may span them --
+only real sessions come back. Each row's trade_date comes from the bar itself
+rather than from the requested dates, so a range cannot mislabel a session.
+"""
 import os
+import re
 import sys
 import numpy as np
 import yfinance as yf
@@ -14,8 +23,22 @@ sys.path.append(os.path.join(os.getcwd(), "scripts"))
 from databricks_sql import execute_merge
 
 #%%
-# -- Edit this for whatever date you're backfilling --
-BACKFILL_DATE = "2026-08-28"
+# -- Used when no dates are given on the command line, e.g. running as cells --
+BACKFILL_DATE = "2026-09-21"
+BACKFILL_END_DATE = "2026-09-24"   # same as BACKFILL_DATE for a single day
+
+#%%
+# Match only YYYY-MM-DD so a notebook kernel's own argv is ignored here.
+dates = [a for a in sys.argv[1:] if re.fullmatch(r"\d{4}-\d{2}-\d{2}", a)]
+start_date = dates[0] if dates else BACKFILL_DATE
+end_date = dates[1] if len(dates) > 1 else (start_date if dates else BACKFILL_END_DATE)
+
+start_ts = pd.Timestamp(start_date)
+end_ts = pd.Timestamp(end_date)
+if end_ts < start_ts:
+    sys.exit(f"End date {end_date} is before start date {start_date}.")
+
+print(f"Backfilling {start_ts:%Y-%m-%d} through {end_ts:%Y-%m-%d}")
 
 #%%
 file_path = "files/sp500_watchlist.csv"
@@ -23,14 +46,11 @@ df = pd.read_csv(file_path)
 tickers = df['tickers'].tolist()
 
 #%%
-# yfinance end date is exclusive, so add one day to capture BACKFILL_DATE
-start = BACKFILL_DATE
-end = str(pd.Timestamp(BACKFILL_DATE) + pd.Timedelta(days=1))[:10]
-
+# yfinance end date is exclusive, so add one day to include end_ts itself
 data = yf.download(
     tickers=tickers,
-    start=start,
-    end=end,
+    start=f"{start_ts:%Y-%m-%d}",
+    end=f"{end_ts + pd.Timedelta(days=1):%Y-%m-%d}",
     interval='1d',
     group_by='ticker',
     auto_adjust=True,
@@ -38,7 +58,7 @@ data = yf.download(
 )
 
 if data.empty:
-    print(f"No data returned for {BACKFILL_DATE}. Exiting.")
+    print(f"No data returned for {start_date}..{end_date}. Exiting.")
     exit(0)
 
 #%%
@@ -54,32 +74,37 @@ for ticker in tickers:
         print(f"Skipping {ticker}, empty dataframe")
         continue
 
-    row = df_ticker.iloc[-1]
+    for stamp, row in df_ticker.iterrows():
+        # A partial row from Yahoo would otherwise reach the SQL as a bare `nan`
+        # literal and fail the whole MERGE.
+        ohlcv = pd.to_numeric(row[["Open", "High", "Low", "Close", "Volume"]], errors="coerce")
+        if not np.isfinite(ohlcv).all():
+            print(f"Skipping {ticker} {stamp.date()}, incomplete OHLCV data")
+            continue
 
-    # A partial row from Yahoo would otherwise reach the SQL as a bare `nan`
-    # literal and fail the whole MERGE.
-    ohlcv = pd.to_numeric(row[["Open", "High", "Low", "Close", "Volume"]], errors="coerce")
-    if not np.isfinite(ohlcv).all():
-        print(f"Skipping {ticker}, incomplete OHLCV data")
-        continue
-
-    rows.append({
-        "ticker": ticker,
-        "trade_date": BACKFILL_DATE,
-        "open": float(row["Open"]),
-        "high": float(row["High"]),
-        "low": float(row["Low"]),
-        "close": float(row["Close"]),
-        "volume": int(row["Volume"]),
-        "run_ts": run_ts
-    })
+        rows.append({
+            "ticker": ticker,
+            "trade_date": stamp.date(),
+            "open": float(row["Open"]),
+            "high": float(row["High"]),
+            "low": float(row["Low"]),
+            "close": float(row["Close"]),
+            "volume": int(row["Volume"]),
+            "run_ts": run_ts
+        })
 
 df_backfill = pd.DataFrame(rows)
-print(f"Backfilling {len(df_backfill)} tickers for {BACKFILL_DATE}")
 
 if df_backfill.empty:
     print("No data to insert. Exiting.")
     exit(0)
+
+df_backfill.drop_duplicates(subset=['ticker', 'trade_date'], inplace=True)
+
+sessions = sorted(df_backfill['trade_date'].unique())
+print(f"Found {len(sessions)} session(s): {', '.join(str(s) for s in sessions)}")
+for session in sessions:
+    print(f"  {session}: {(df_backfill['trade_date'] == session).sum()} tickers")
 
 #%%
 def build_merge_sql(batch):
@@ -108,5 +133,5 @@ VALUES (source.ticker, source.trade_date, source.open, source.high, source.low, 
 """
 
 #%%
-loaded = execute_merge(list(df_backfill.itertuples()), build_merge_sql, label="tickers")
-print(f"Backfill for {BACKFILL_DATE} succeeded. {loaded} tickers loaded.")
+loaded = execute_merge(list(df_backfill.itertuples()), build_merge_sql, label="rows")
+print(f"Backfill complete. {loaded} rows across {len(sessions)} session(s).")
