@@ -18,9 +18,9 @@ into the warehouse's own state and health message.
 
 The most common cause of that cold-start failure here is a Free Edition
 workspace deactivated for inactivity: the resource-gatekeeper then denies all
-compute with denyReason INACTIVE. Failed calls do not reactivate it -- someone
-has to open the workspace UI -- so that case is named explicitly and never
-retried.
+compute with denyReason INACTIVE. No automated activity reactivates it -- a
+human has to open the workspace UI -- so that case is named explicitly and
+never retried.
 """
 import os
 import time
@@ -31,8 +31,9 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 WAREHOUSE_REJECT = "could not be processed by the warehouse"
 INACTIVE_HELP = (
     "The Databricks workspace is deactivated for inactivity, so no compute can "
-    "be created. Log into the workspace UI to reactivate it, then re-run. "
-    "Failing jobs do not reactivate it on their own."
+    "be created. Only a human opening the workspace UI clears this -- automated "
+    "activity does not count toward it, so no job and no retry can reactivate "
+    "the workspace. Log in, then re-run."
 )
 # A cold serverless start is usually under a minute; classic warehouses take
 # longer. Kept inside the workflow's timeout-minutes so the job fails with this
@@ -256,30 +257,6 @@ def _await_result(body, host, headers, poll_seconds, poll_timeout):
 
 def _state(body):
     return body.get("status", {}).get("state")
-
-
-def warehouse_state():
-    """Current warehouse state, or None if it cannot be inspected."""
-    host, headers, warehouse_id = _config()
-    warehouse = _get_warehouse(host, headers, warehouse_id)
-    return warehouse.get("state") if warehouse else None
-
-
-def stop_warehouse():
-    """Stop the warehouse. Best effort -- never worth failing a job over."""
-    host, headers, warehouse_id = _config()
-    try:
-        response = requests.post(
-            f"{host}/api/2.0/sql/warehouses/{warehouse_id}/stop",
-            headers=headers, timeout=60)
-    except requests.exceptions.RequestException as exc:
-        print(f"Could not stop warehouse {warehouse_id} ({exc}).")
-        return
-    if response.status_code == 200:
-        print(f"Stopped warehouse {warehouse_id}.")
-    else:
-        print(f"Could not stop warehouse {warehouse_id} "
-              f"(HTTP {response.status_code}: {response.text}).")
 
 
 def execute_merge(rows, build_sql, batch_size=200, label="rows"):
